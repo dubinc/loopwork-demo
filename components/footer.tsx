@@ -4,13 +4,13 @@ import Link from "next/link";
 import { FOOTER_LINKS } from "@/lib/content";
 
 const socials = [
-  { name: "Twitter", icon: Twitter, href: "https://twitter.com/loopworkhq" },
+  { name: "X", icon: Twitter, href: "https://x.com/dubdotco" },
   {
     name: "LinkedIn",
     icon: LinkedIn,
-    href: "https://www.linkedin.com/company/loopwork",
+    href: "https://www.linkedin.com/company/dubinc",
   },
-  { name: "GitHub", icon: Github, href: "https://github.com/loopwork" },
+  { name: "GitHub", icon: Github, href: "https://github.com/dubinc" },
 ];
 
 const columnClass = "text-sm font-semibold text-neutral-950";
