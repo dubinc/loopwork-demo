@@ -1,0 +1,31 @@
+@import "@dub/tailwind-config/themes.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-feature-settings: "cv11", "ss01";
+}
+
+.font-display {
+  letter-spacing: -0.02em;
+}
+
+@layer utilities {
+  .bg-grid-fade {
+    background-image: radial-gradient(
+      circle at center,
+      rgb(140 89 248 / 0.14) 0%,
+      transparent 65%
+    );
+  }
+
+  .mask-fade-b {
+    mask-image: linear-gradient(to bottom, black 75%, transparent 100%);
+  }
+}
