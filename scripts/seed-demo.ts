@@ -1,86 +1,82 @@
 import {
   CUSTOMERS,
-  PARTNERS,
-  customersDueOn,
+  TRIAL_CUSTOMERS,
   saleAmountCents,
 } from "../lib/demo/catalog";
 import { createDubClient } from "../lib/demo/dub";
-import { monthlyInvoiceId, trackSubscriptionSale } from "../lib/demo/sales";
-import { trackClick } from "../lib/demo/track-click";
+import { seedBrowseClickCount } from "../lib/demo/funnel";
+import { onboardCustomer } from "../lib/demo/onboard";
+import { ensurePartnerLinks } from "../lib/demo/partners";
+import { monthlyInvoiceId } from "../lib/demo/sales";
+import { recordBrowseClicks, userAgentAt } from "../lib/demo/track-click";
+
+const SEED_CUSTOMERS = [...CUSTOMERS, ...TRIAL_CUSTOMERS];
 
 async function main() {
   const dub = createDubClient();
-  const clickIdByPartner = new Map<string, string>();
 
-  console.log(`Creating ${PARTNERS.length} partners…`);
-  for (const partner of PARTNERS) {
-    const created = await dub.partners.create({
-      name: partner.name,
-      email: partner.email,
-      username: partner.username,
-      tenantId: partner.tenantId,
-      description: partner.description ?? null,
-    });
+  console.log("Creating partners…");
+  const partnerLinks = await ensurePartnerLinks(dub);
+  const linkByUsername = new Map(
+    partnerLinks.map((entry) => [entry.partner.username, entry]),
+  );
 
-    const link =
-      created.links?.[0] ??
-      (await dub.partners.retrieveLinks({ tenantId: partner.tenantId }))[0];
+  for (const entry of partnerLinks) {
+    console.log(
+      `  ${entry.partner.name} (${entry.partner.email}) → ${entry.shortLink}`,
+    );
+  }
+
+  console.log("\nRecording browse clicks (no lead)…");
+  let browseClicks = 0;
+  for (const [index, entry] of partnerLinks.entries()) {
+    const count = seedBrowseClickCount(entry.partner);
+    await recordBrowseClicks(
+      entry.domain,
+      entry.key,
+      count,
+      index * 20,
+    );
+    browseClicks += count;
+    console.log(`  ${entry.partner.username}: ${count} clicks`);
+  }
+
+  console.log(
+    `\nOnboarding ${SEED_CUSTOMERS.length} customers (click → lead → sale if paid)…`,
+  );
+
+  for (const [index, customer] of SEED_CUSTOMERS.entries()) {
+    const link = linkByUsername.get(customer.partnerUsername);
     if (!link) {
       throw new Error(
-        `Partner ${partner.email} was created but has no referral link`,
+        `No referral link for partner ${customer.partnerUsername} (${customer.name})`,
       );
     }
 
-    const clickId = await trackClick(link.domain, link.key);
-    clickIdByPartner.set(partner.username, clickId);
-    console.log(
-      `  ${partner.name} (${partner.email}) → ${link.shortLink} click=${clickId}`,
-    );
-  }
-
-  console.log(`\nTracking ${CUSTOMERS.length} leads…`);
-  for (const customer of CUSTOMERS) {
-    const clickId = clickIdByPartner.get(customer.partnerUsername);
-    if (!clickId) {
-      throw new Error(
-        `No clickId for partner ${customer.partnerUsername} (${customer.name})`,
-      );
-    }
-
-    await dub.track.lead({
-      clickId,
-      eventName: "Sign Up",
-      customerExternalId: customer.externalId,
-      customerName: customer.name,
-      customerEmail: customer.email,
-      mode: "wait",
+    const { clickId, amount } = await onboardCustomer({
+      dub,
+      customer,
+      link,
+      userAgent: userAgentAt(200 + index),
+      saleEventName: "Subscription created",
     });
+
+    const saleLabel =
+      amount === null
+        ? "lead only"
+        : `$${((amount ?? 0) / 100).toFixed(2)} (${monthlyInvoiceId(customer.externalId)})`;
+
     console.log(
-      `  ${customer.name} → ${customer.plan} / ${customer.seats} seats (${customer.partnerUsername})`,
+      `  ${customer.name} → ${customer.plan} / ${customer.seats} seats via ${customer.partnerUsername} click=${clickId} ${saleLabel}`,
     );
   }
 
-  const dueToday = customersDueOn();
-  if (dueToday.length === 0) {
-    console.log(
-      "\nNo customers bill today. First invoices land on each billing day via cron.",
-    );
-  } else {
-    console.log(`\nTracking ${dueToday.length} subscription sale(s) due today…`);
-    for (const customer of dueToday) {
-      const amount = saleAmountCents(customer);
-      await trackSubscriptionSale({
-        dub,
-        customer,
-        eventName: "Subscription created",
-      });
-      console.log(
-        `  ${customer.name} (day ${customer.billingDay}) → $${((amount ?? 0) / 100).toFixed(2)} (${monthlyInvoiceId(customer.externalId)})`,
-      );
-    }
-  }
-
-  console.log("\nSeed complete.");
+  const paid = SEED_CUSTOMERS.filter(
+    (customer) => saleAmountCents(customer) !== null,
+  );
+  console.log(
+    `\nSeed complete. ~${browseClicks + SEED_CUSTOMERS.length} clicks, ${SEED_CUSTOMERS.length} leads, ${paid.length} sales.`,
+  );
 }
 
 main().catch((error) => {

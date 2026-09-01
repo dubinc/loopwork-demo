@@ -18,9 +18,37 @@ export type DemoCustomer = {
   partnerUsername: string;
   plan: PlanName;
   seats: number;
+  country: string;
   /** Day of month (1–28) the subscription invoices. Starter has none. */
   billingDay?: number;
 };
+
+export const CUSTOMER_COUNTRIES = [
+  "US",
+  "GB",
+  "CA",
+  "DE",
+  "AU",
+  "NL",
+  "FR",
+  "BR",
+  "JP",
+  "SG",
+  "IE",
+  "ES",
+  "SE",
+  "IN",
+  "MX",
+  "IT",
+  "KR",
+  "NZ",
+  "CH",
+  "PT",
+] as const;
+
+export function countryAt(index: number) {
+  return CUSTOMER_COUNTRIES[index % CUSTOMER_COUNTRIES.length];
+}
 
 export const PARTNERS: DemoPartner[] = [
   {
@@ -75,6 +103,17 @@ export const PARTNERS: DemoPartner[] = [
     tenantId: "lw_grace",
     description: "NovaReach Media",
   },
+];
+
+export const TRIAL_CUSTOMERS: DemoCustomer[] = [
+  customer("Dune & Co.", "dune", "maya", "Starter", 2),
+  customer("Paperkite Studio", "paperkite", "jordan", "Starter", 2),
+  customer("Lantern House", "lantern", "trevor", "Starter", 2),
+  customer("Softwood Supply", "softwood", "liam", "Starter", 2),
+  customer("Kite & Needle", "kiteneedle", "priya", "Starter", 2),
+  customer("Riverbed Films", "riverbed", "diego", "Starter", 2),
+  customer("Glasshouse PR", "glasshouse", "sofia", "Starter", 2),
+  customer("Foldline Studio", "foldline", "grace", "Starter", 2),
 ];
 
 export const CUSTOMERS: DemoCustomer[] = [
@@ -148,6 +187,15 @@ function customer(
     partnerUsername,
     plan,
     seats,
+    country: countryFromSlug(slug),
     billingDay,
   };
+}
+
+function countryFromSlug(slug: string) {
+  let hash = 0;
+  for (const character of slug) {
+    hash += character.charCodeAt(0);
+  }
+  return countryAt(hash);
 }
