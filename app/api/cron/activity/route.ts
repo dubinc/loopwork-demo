@@ -70,6 +70,7 @@ export async function GET(request: NextRequest) {
         link,
         userAgent: userAgentAt(partnerLinks.length + offset),
         saleEventName: "Subscription created",
+        clickIndex: partnerLinks.length + offset,
       });
 
       leads.push({

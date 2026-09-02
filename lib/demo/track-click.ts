@@ -1,5 +1,6 @@
-import { SITE_URL } from "../site";
+import { countryAt } from "./catalog";
 import { DUB_API_BASE_URL } from "./dub";
+import { referrerAt } from "./traffic";
 
 export const USER_AGENTS = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -25,28 +26,45 @@ export function userAgentAt(index: number) {
 export async function trackClick(
   domain: string,
   key: string,
-  userAgent = USER_AGENTS[0],
+  {
+    userAgent = USER_AGENTS[0],
+    referrer = referrerAt(0),
+    country = countryAt(0),
+  }: {
+    userAgent?: string;
+    referrer?: string;
+    country?: string;
+  } = {},
 ) {
-  const response = await fetch(`${DUB_API_BASE_URL}/track/click`, {
+  const secret = process.env.DEMO_CLICK_SECRET;
+  if (!secret) {
+    throw new Error("Missing DEMO_CLICK_SECRET");
+  }
+
+  const response = await fetch(`${DUB_API_BASE_URL}/demo/click`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Referer: SITE_URL,
-      Origin: SITE_URL,
-      "User-Agent": userAgent,
+      Authorization: `Bearer ${secret}`,
     },
-    body: JSON.stringify({ domain, key }),
+    body: JSON.stringify({
+      domain,
+      key,
+      country,
+      referrer,
+      userAgent,
+    }),
   });
 
   if (!response.ok) {
     throw new Error(
-      `POST /track/click failed (${response.status}): ${await response.text()}`,
+      `POST /demo/click failed (${response.status}): ${await response.text()}`,
     );
   }
 
   const data = (await response.json()) as { clickId?: string };
   if (!data.clickId) {
-    throw new Error("POST /track/click did not return a clickId");
+    throw new Error("POST /demo/click did not return a clickId");
   }
 
   return data.clickId;
@@ -60,7 +78,14 @@ export async function recordBrowseClicks(
 ) {
   const clickIds: string[] = [];
   for (let index = 0; index < count; index++) {
-    clickIds.push(await trackClick(domain, key, userAgentAt(uaOffset + index)));
+    const slot = uaOffset + index;
+    clickIds.push(
+      await trackClick(domain, key, {
+        userAgent: userAgentAt(slot),
+        referrer: referrerAt(slot),
+        country: countryAt(slot),
+      }),
+    );
   }
   return clickIds;
 }

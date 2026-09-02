@@ -2,6 +2,7 @@ import type { Dub } from "dub";
 import { saleAmountCents, type DemoCustomer } from "./catalog";
 import type { PartnerLink } from "./partners";
 import { trackSubscriptionSale } from "./sales";
+import { referrerAt } from "./traffic";
 import { trackClick } from "./track-click";
 
 export async function onboardCustomer({
@@ -10,14 +11,20 @@ export async function onboardCustomer({
   link,
   userAgent,
   saleEventName,
+  clickIndex = 0,
 }: {
   dub: Dub;
   customer: DemoCustomer;
   link: PartnerLink;
   userAgent: string;
   saleEventName: "Subscription created" | "Invoice paid";
+  clickIndex?: number;
 }) {
-  const clickId = await trackClick(link.domain, link.key, userAgent);
+  const clickId = await trackClick(link.domain, link.key, {
+    userAgent,
+    referrer: referrerAt(clickIndex),
+    country: customer.country,
+  });
 
   await dub.track.lead({
     clickId,
