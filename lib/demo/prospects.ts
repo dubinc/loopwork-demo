@@ -8,8 +8,11 @@ import {
   type PlanName,
 } from "./catalog";
 
-/** First day the activity cron started creating customers. */
-const DEMO_ACTIVITY_START = Date.UTC(2026, 8, 1);
+/** First day of the historical backfill. Cron renewals look back to this date. */
+const DEMO_ACTIVITY_START = Date.UTC(2026, 7, 3);
+
+/** First day the live activity cron started. Do not change — existing cron customers use this epoch. */
+const DEMO_SEQUENCE_EPOCH = Date.UTC(2026, 8, 1);
 
 type Prospect = { name: string; slug: string; contact: string };
 
@@ -64,6 +67,23 @@ const DAILY_PLAN_SETS: PlanName[][] = [
 ];
 
 const NEW_CUSTOMERS_PER_DAY = 3;
+
+/**
+ * Backfill sequence indices are offset far past anything the live cron will
+ * reach, so historical (Aug) prospects never collide with real cron-created
+ * customers on/after DEMO_SEQUENCE_EPOCH.
+ */
+const BACKFILL_INDEX_BASE = 1_000_000;
+
+/** A little extra volume for the August backfill only — never used by the live cron. */
+const BACKFILL_EXTRA_CUSTOMERS_PER_DAY = 1;
+const BACKFILL_EXTRA_INDEX_BASE = 2_000_000;
+const BACKFILL_EXTRA_PLAN_SETS: PlanName[][] = [
+  ["Starter"],
+  ["Team"],
+  ["Starter"],
+  ["Business"],
+];
 
 const STEMS = [
   "Willow",
@@ -184,6 +204,46 @@ export function dailyNewCustomers(date = new Date()): DemoCustomer[] {
   });
 }
 
+/** Extra August-only customers, on top of `dailyNewCustomers`, to give the history backfill a bit more volume. */
+export function backfillExtraCustomers(date: Date): DemoCustomer[] {
+  const dayIndex = utcDayIndex(date);
+  const dateKey = utcDateKey(date);
+  const plans =
+    BACKFILL_EXTRA_PLAN_SETS[
+    ((dayIndex % BACKFILL_EXTRA_PLAN_SETS.length) +
+      BACKFILL_EXTRA_PLAN_SETS.length) %
+    BACKFILL_EXTRA_PLAN_SETS.length
+    ];
+
+  return Array.from(
+    { length: BACKFILL_EXTRA_CUSTOMERS_PER_DAY },
+    (_, offset) => {
+      const sequence =
+        BACKFILL_EXTRA_INDEX_BASE +
+        dayIndex * BACKFILL_EXTRA_CUSTOMERS_PER_DAY +
+        offset;
+      const prospect = prospectAt(sequence);
+      const plan = plans[offset];
+      const partner =
+        PARTNERS[
+        (((dayIndex + offset + 1) % PARTNERS.length) + PARTNERS.length) %
+        PARTNERS.length
+        ];
+
+      return {
+        name: prospect.name,
+        slug: prospect.slug,
+        email: emailOf(prospect),
+        externalId: `cus_${prospect.slug}_${dateKey}_x`,
+        partnerUsername: partner.username,
+        plan,
+        seats: seatsFor(plan, dayIndex + offset + 7),
+        country: countryAt(sequence),
+      };
+    },
+  );
+}
+
 export function generatedCustomersToRenew(now = new Date()): DemoCustomer[] {
   const due: DemoCustomer[] = [];
 
@@ -204,7 +264,10 @@ export function generatedCustomersToRenew(now = new Date()): DemoCustomer[] {
       continue;
     }
 
-    for (const customer of dailyNewCustomers(past)) {
+    for (const customer of [
+      ...dailyNewCustomers(past),
+      ...backfillExtraCustomers(past),
+    ]) {
       if (saleAmountCents(customer) !== null) {
         due.push(customer);
       }
@@ -306,9 +369,19 @@ function synthesizeProspect(index: number): Prospect {
 }
 
 function sequenceIndex(date: Date, offset: number) {
-  const startDay = Math.floor(DEMO_ACTIVITY_START / 86_400_000);
-  const elapsed = Math.max(0, utcDayIndex(date) - startDay);
-  return elapsed * NEW_CUSTOMERS_PER_DAY + offset;
+  const day = utcDayIndex(date);
+  const cronEpoch = Math.floor(DEMO_SEQUENCE_EPOCH / 86_400_000);
+
+  if (day >= cronEpoch) {
+    return (day - cronEpoch) * NEW_CUSTOMERS_PER_DAY + offset;
+  }
+
+  const backfillEpoch = Math.floor(DEMO_ACTIVITY_START / 86_400_000);
+  return (
+    BACKFILL_INDEX_BASE +
+    Math.max(0, day - backfillEpoch) * NEW_CUSTOMERS_PER_DAY +
+    offset
+  );
 }
 
 function utcDayIndex(date: Date) {

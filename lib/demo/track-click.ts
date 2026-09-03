@@ -30,10 +30,12 @@ export async function trackClick(
     userAgent = USER_AGENTS[0],
     referrer = referrerAt(0),
     country = countryAt(0),
+    timestamp,
   }: {
     userAgent?: string;
     referrer?: string;
     country?: string;
+    timestamp?: Date | string;
   } = {},
 ) {
   const secret = process.env.DEMO_CLICK_SECRET;
@@ -53,6 +55,10 @@ export async function trackClick(
       country,
       referrer,
       userAgent,
+      ...(timestamp && {
+        timestamp:
+          typeof timestamp === "string" ? timestamp : timestamp.toISOString(),
+      }),
     }),
   });
 
@@ -75,15 +81,20 @@ export async function recordBrowseClicks(
   key: string,
   count: number,
   uaOffset = 0,
+  timestamp?: Date,
 ) {
   const clickIds: string[] = [];
   for (let index = 0; index < count; index++) {
     const slot = uaOffset + index;
+    const clickedAt = timestamp
+      ? new Date(timestamp.getTime() + index * 60_000)
+      : undefined;
     clickIds.push(
       await trackClick(domain, key, {
         userAgent: userAgentAt(slot),
         referrer: referrerAt(slot),
         country: countryAt(slot),
+        timestamp: clickedAt,
       }),
     );
   }

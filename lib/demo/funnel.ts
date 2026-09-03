@@ -6,3 +6,6 @@ export function seedBrowseClickCount(partner: DemoPartner) {
 }
 
 export const CRON_BROWSE_CLICKS_PER_PARTNER = 5;
+
+/** Browse clicks per partner per day in the August history backfill. */
+export const BACKFILL_BROWSE_CLICKS_PER_PARTNER = 4;
