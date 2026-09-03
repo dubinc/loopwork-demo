@@ -49,6 +49,7 @@ export async function trackClick(
       "Content-Type": "application/json",
       Authorization: `Bearer ${secret}`,
     },
+    signal: AbortSignal.timeout(30_000),
     body: JSON.stringify({
       domain,
       key,

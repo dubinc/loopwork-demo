@@ -7,6 +7,8 @@ import {
   type DemoCustomer,
   type PlanName,
 } from "./catalog";
+import { organicDailyLeadTarget, organicDailySalesTarget } from "./funnel";
+import { seededRandom } from "./random";
 
 /** First day of the historical backfill. Cron renewals look back to this date. */
 const DEMO_ACTIVITY_START = Date.UTC(2026, 7, 3);
@@ -70,20 +72,39 @@ const NEW_CUSTOMERS_PER_DAY = 3;
 
 /**
  * Backfill sequence indices are offset far past anything the live cron will
- * reach, so historical (Aug) prospects never collide with real cron-created
+ * reach, so historical (Aug) prospects never collide with cron-created
  * customers on/after DEMO_SEQUENCE_EPOCH.
  */
 const BACKFILL_INDEX_BASE = 1_000_000;
 
-/** A little extra volume for the August backfill only — never used by the live cron. */
-const BACKFILL_EXTRA_CUSTOMERS_PER_DAY = 1;
-const BACKFILL_EXTRA_INDEX_BASE = 2_000_000;
-const BACKFILL_EXTRA_PLAN_SETS: PlanName[][] = [
-  ["Starter"],
-  ["Team"],
-  ["Starter"],
-  ["Business"],
-];
+/** Max reserved slots/day for extraDailyCustomers (keeps index math collision-free). */
+const EXTRA_CUSTOMERS_MAX_PER_DAY = 40;
+const EXTRA_CUSTOMERS_INDEX_BASE = 10_000_000;
+
+/**
+ * Deterministically assigns which of `count` customer slots are on a
+ * paying plan (Team/Business, alternating) vs. a free Starter plan, such
+ * that exactly `salesCount` of them are paying — while still looking
+ * organic (the paying slots are shuffled, not just the first N).
+ */
+function assignPlans(count: number, salesCount: number, seed: string): PlanName[] {
+  const indices = Array.from({ length: count }, (_, i) => i);
+  const shuffled = [...indices].sort(
+    (a, b) =>
+      seededRandom(`plan-shuffle:${seed}:${a}`) -
+      seededRandom(`plan-shuffle:${seed}:${b}`),
+  );
+  const payingIndices = new Set(shuffled.slice(0, salesCount));
+
+  let payingSeen = 0;
+  return indices.map((i) => {
+    if (!payingIndices.has(i)) {
+      return "Starter";
+    }
+    payingSeen += 1;
+    return payingSeen % 2 === 0 ? "Business" : "Team";
+  });
+}
 
 const STEMS = [
   "Willow",
@@ -204,44 +225,51 @@ export function dailyNewCustomers(date = new Date()): DemoCustomer[] {
   });
 }
 
-/** Extra August-only customers, on top of `dailyNewCustomers`, to give the history backfill a bit more volume. */
-export function backfillExtraCustomers(date: Date): DemoCustomer[] {
+/**
+ * Tops up `dailyNewCustomers` so the day lands on the organic lead/sale
+ * targets (25–35 leads, 15–25 sales). Used by the live cron and by any
+ * later gap-fill via the backfill script.
+ */
+export function extraDailyCustomers(date: Date): DemoCustomer[] {
   const dayIndex = utcDayIndex(date);
   const dateKey = utcDateKey(date);
-  const plans =
-    BACKFILL_EXTRA_PLAN_SETS[
-    ((dayIndex % BACKFILL_EXTRA_PLAN_SETS.length) +
-      BACKFILL_EXTRA_PLAN_SETS.length) %
-    BACKFILL_EXTRA_PLAN_SETS.length
-    ];
 
-  return Array.from(
-    { length: BACKFILL_EXTRA_CUSTOMERS_PER_DAY },
-    (_, offset) => {
-      const sequence =
-        BACKFILL_EXTRA_INDEX_BASE +
-        dayIndex * BACKFILL_EXTRA_CUSTOMERS_PER_DAY +
-        offset;
-      const prospect = prospectAt(sequence);
-      const plan = plans[offset];
-      const partner =
-        PARTNERS[
-        (((dayIndex + offset + 1) % PARTNERS.length) + PARTNERS.length) %
-        PARTNERS.length
-        ];
+  const leadsTarget = organicDailyLeadTarget(date);
+  const salesTarget = organicDailySalesTarget(date);
 
-      return {
-        name: prospect.name,
-        slug: prospect.slug,
-        email: emailOf(prospect),
-        externalId: `cus_${prospect.slug}_${dateKey}_x`,
-        partnerUsername: partner.username,
-        plan,
-        seats: seatsFor(plan, dayIndex + offset + 7),
-        country: countryAt(sequence),
-      };
-    },
-  );
+  const primary = dailyNewCustomers(date);
+  const primarySales = primary.filter(
+    (customer) => saleAmountCents(customer) !== null,
+  ).length;
+
+  const count = Math.max(0, leadsTarget - primary.length);
+  const salesCount = Math.max(0, Math.min(count, salesTarget - primarySales));
+  const plans = assignPlans(count, salesCount, dateKey);
+
+  return Array.from({ length: count }, (_, offset) => {
+    const sequence =
+      EXTRA_CUSTOMERS_INDEX_BASE +
+      dayIndex * EXTRA_CUSTOMERS_MAX_PER_DAY +
+      offset;
+    const prospect = prospectAt(sequence);
+    const plan = plans[offset];
+    const partner =
+      PARTNERS[
+      (((dayIndex + offset + 1) % PARTNERS.length) + PARTNERS.length) %
+      PARTNERS.length
+      ];
+
+    return {
+      name: prospect.name,
+      slug: prospect.slug,
+      email: emailOf(prospect),
+      externalId: `cus_${prospect.slug}_${dateKey}_x${offset}`,
+      partnerUsername: partner.username,
+      plan,
+      seats: seatsFor(plan, dayIndex + offset + 7),
+      country: countryAt(sequence),
+    };
+  });
 }
 
 export function generatedCustomersToRenew(now = new Date()): DemoCustomer[] {
@@ -266,7 +294,7 @@ export function generatedCustomersToRenew(now = new Date()): DemoCustomer[] {
 
     for (const customer of [
       ...dailyNewCustomers(past),
-      ...backfillExtraCustomers(past),
+      ...extraDailyCustomers(past),
     ]) {
       if (saleAmountCents(customer) !== null) {
         due.push(customer);
@@ -293,25 +321,37 @@ function rawProspect(index: number): Prospect {
   return synthesizeProspect(index - PROSPECTS.length);
 }
 
-function prospectAt(index: number): Prospect {
+function catalogReservations() {
   const catalog = [...CUSTOMERS, ...TRIAL_CUSTOMERS];
-  const reservedEmails = new Set(
-    catalog.map((customer) => customer.email.toLowerCase()),
-  );
-  const reservedSlugs = new Set(catalog.map((customer) => customer.slug));
+  return {
+    emails: new Set(catalog.map((customer) => customer.email.toLowerCase())),
+    slugs: new Set(catalog.map((customer) => customer.slug)),
+  };
+}
 
-  let current: Prospect | undefined;
-  for (let i = 0; i <= index; i++) {
-    current = uniquify(rawProspect(i), reservedEmails, reservedSlugs);
-    reservedEmails.add(emailOf(current).toLowerCase());
-    reservedSlugs.add(current.slug);
+/**
+ * Resolve a unique prospect for `index`. Small sequential indices walk the
+ * curated list. High extra-pool indices synthesize in O(1).
+ */
+function prospectAt(index: number): Prospect {
+  const reserved = catalogReservations();
+
+  if (index < PROSPECTS.length) {
+    let current: Prospect | undefined;
+    for (let i = 0; i <= index; i++) {
+      current = uniquify(rawProspect(i), reserved.emails, reserved.slugs);
+      reserved.emails.add(emailOf(current).toLowerCase());
+      reserved.slugs.add(current.slug);
+    }
+
+    if (!current) {
+      throw new Error(`Failed to allocate a unique prospect at index ${index}`);
+    }
+
+    return current;
   }
 
-  if (!current) {
-    throw new Error(`Failed to allocate a unique prospect at index ${index}`);
-  }
-
-  return current;
+  return uniquify(rawProspect(index), reserved.emails, reserved.slugs);
 }
 
 function uniquify(

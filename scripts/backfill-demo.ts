@@ -1,13 +1,14 @@
 import { saleAmountCents } from "../lib/demo/catalog";
 import { createDemoCommission } from "../lib/demo/demo-commission";
 import { createDubClient } from "../lib/demo/dub";
-import { BACKFILL_BROWSE_CLICKS_PER_PARTNER } from "../lib/demo/funnel";
+import { organicBrowseClickCount } from "../lib/demo/funnel";
 import { getPartnerLinks } from "../lib/demo/partners";
-import { backfillExtraCustomers, dailyNewCustomers } from "../lib/demo/prospects";
+import { dailyNewCustomers, extraDailyCustomers } from "../lib/demo/prospects";
 import { monthlyInvoiceId } from "../lib/demo/sales";
 import { referrerAt } from "../lib/demo/traffic";
 import { recordBrowseClicks, userAgentAt } from "../lib/demo/track-click";
 
+// Set the UTC window before running. Do not re-run a range that's already filled.
 const BACKFILL_START = Date.UTC(2026, 7, 3);
 const BACKFILL_END = Date.UTC(2026, 7, 31);
 const DAY_MS = 86_400_000;
@@ -32,6 +33,10 @@ function atUtcHour(day: Date, hour: number, minute = 0) {
   );
 }
 
+function log(message: string) {
+  console.log(`[${new Date().toISOString().slice(11, 23)}] ${message}`);
+}
+
 async function main() {
   const dub = createDubClient();
   const partnerLinks = await getPartnerLinks(dub);
@@ -40,38 +45,37 @@ async function main() {
   );
 
   const days = eachUtcDay(BACKFILL_START, BACKFILL_END);
-  console.log(
-    `Backfilling ${days.length} days (${days[0].toISOString().slice(0, 10)} → ${days[days.length - 1].toISOString().slice(0, 10)})…`,
+  log(
+    `backfilling ${days.length} days (${days[0].toISOString().slice(0, 10)} → ${days[days.length - 1].toISOString().slice(0, 10)})`,
   );
 
   let browseClicks = 0;
   let leads = 0;
   let sales = 0;
+  let skipped = 0;
 
   for (const [dayIndex, day] of days.entries()) {
     const dateKey = day.toISOString().slice(0, 10);
     const browseAt = atUtcHour(day, 14, 0);
+    const customers = [
+      ...dailyNewCustomers(day),
+      ...extraDailyCustomers(day),
+    ];
 
-    console.log(`\n${dateKey}`);
+    log(`\n=== ${dateKey}  day ${dayIndex + 1}/${days.length} ===`);
 
     for (const [partnerIndex, entry] of partnerLinks.entries()) {
+      const count = organicBrowseClickCount(day, entry.partner.username);
+      log(`browse ${entry.partner.username}: ${count} clicks`);
       const recorded = await recordBrowseClicks(
         entry.domain,
         entry.key,
-        BACKFILL_BROWSE_CLICKS_PER_PARTNER,
+        count,
         dayIndex * 40 + partnerIndex * 5,
         browseAt,
       );
       browseClicks += recorded.length;
-      console.log(
-        `  browse ${entry.partner.username}: ${recorded.length} clicks`,
-      );
     }
-
-    const customers = [
-      ...dailyNewCustomers(day),
-      ...backfillExtraCustomers(day),
-    ];
 
     for (const [offset, customer] of customers.entries()) {
       const link = linkByUsername.get(customer.partnerUsername);
@@ -84,40 +88,49 @@ async function main() {
       const amount = saleAmountCents(customer);
       const eventAt = atUtcHour(day, 15, offset * 10);
       const slot = dayIndex * 10 + offset;
+      const type = amount === null ? "lead" : "sale";
 
-      const { clickId } = await createDemoCommission({
-        domain: link.domain,
-        key: link.key,
-        date: eventAt,
-        type: amount === null ? "lead" : "sale",
-        customer,
-        referrer: referrerAt(slot),
-        userAgent: userAgentAt(slot),
-        country: customer.country,
-        ...(amount !== null && {
-          sale: {
-            amount,
-            invoiceId: monthlyInvoiceId(customer.externalId, day),
-            eventName: "Subscription created",
-          },
-        }),
-      });
+      try {
+        const { clickId } = await createDemoCommission({
+          domain: link.domain,
+          key: link.key,
+          date: eventAt,
+          type,
+          customer,
+          referrer: referrerAt(slot),
+          userAgent: userAgentAt(slot),
+          country: customer.country,
+          ...(amount !== null && {
+            sale: {
+              amount,
+              invoiceId: monthlyInvoiceId(customer.externalId, day),
+              eventName: "Subscription created",
+            },
+          }),
+        });
 
-      if (amount === null) {
-        leads += 1;
-        console.log(`  lead ${customer.name} click=${clickId}`);
-      } else {
-        leads += 1;
-        sales += 1;
-        console.log(
-          `  sale ${customer.name} $${(amount / 100).toFixed(2)} click=${clickId}`,
+        if (amount === null) {
+          leads += 1;
+          log(`lead ${customer.name} click=${clickId}`);
+        } else {
+          leads += 1;
+          sales += 1;
+          log(
+            `sale ${customer.name} $${(amount / 100).toFixed(2)} click=${clickId}`,
+          );
+        }
+      } catch (error) {
+        skipped += 1;
+        log(
+          `error ${customer.name}: ${error instanceof Error ? error.message : String(error)
+          }`,
         );
       }
     }
   }
 
-  console.log(
-    `\nBackfill complete. ${browseClicks} browse clicks, ${leads} leads, ${sales} sales.`,
+  log(
+    `backfill complete. ${browseClicks} browse clicks, ${leads} leads, ${sales} sales, ${skipped} skipped.`,
   );
 }
 

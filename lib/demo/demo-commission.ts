@@ -40,6 +40,7 @@ export async function createDemoCommission({
       "Content-Type": "application/json",
       Authorization: `Bearer ${secret}`,
     },
+    signal: AbortSignal.timeout(30_000),
     body: JSON.stringify({
       domain,
       key,

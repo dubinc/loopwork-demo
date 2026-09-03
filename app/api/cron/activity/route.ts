@@ -1,18 +1,20 @@
 import { customersDueOn, saleAmountCents } from "@/lib/demo/catalog";
+import { mapWithConcurrency } from "@/lib/demo/concurrency";
 import { createDubClient } from "@/lib/demo/dub";
+import { organicBrowseClickCount } from "@/lib/demo/funnel";
 import { onboardCustomer } from "@/lib/demo/onboard";
 import { getPartnerLinks } from "@/lib/demo/partners";
 import {
   dailyNewCustomers,
+  extraDailyCustomers,
   generatedCustomersToRenew,
 } from "@/lib/demo/prospects";
 import { monthlyInvoiceId, trackSubscriptionSale } from "@/lib/demo/sales";
-import { CRON_BROWSE_CLICKS_PER_PARTNER } from "@/lib/demo/funnel";
 import { recordBrowseClicks, userAgentAt } from "@/lib/demo/track-click";
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
@@ -29,118 +31,139 @@ export async function GET(request: NextRequest) {
     partnerLinks.map((entry) => [entry.partner.username, entry]),
   );
 
-  const clicks: Array<{ partner: string; count: number }> = [];
-  for (const [index, entry] of partnerLinks.entries()) {
-    const recorded = await recordBrowseClicks(
-      entry.domain,
-      entry.key,
-      CRON_BROWSE_CLICKS_PER_PARTNER,
-      index * 10,
-    );
-    clicks.push({
-      partner: entry.partner.username,
-      count: recorded.length,
-    });
-  }
+  const clicks = await mapWithConcurrency(
+    partnerLinks,
+    partnerLinks.length,
+    async (entry, index) => {
+      const count = organicBrowseClickCount(now, entry.partner.username);
+      const recorded = await recordBrowseClicks(
+        entry.domain,
+        entry.key,
+        count,
+        index * 60,
+      );
+      return { partner: entry.partner.username, count: recorded.length };
+    },
+  );
 
-  const leads: Array<{
+  const customers = [...dailyNewCustomers(now), ...extraDailyCustomers(now)];
+
+  type LeadResult = {
     customerExternalId: string;
     partner: string;
     plan: string;
     clickId: string;
-  }> = [];
-  const newSales: Array<{
+  };
+  type SaleResult = {
     customerExternalId: string;
     invoiceId: string;
     amount: number;
     ok: boolean;
     error?: string;
-  }> = [];
+  };
 
-  for (const [offset, customer] of dailyNewCustomers(now).entries()) {
-    const link = linkByUsername.get(customer.partnerUsername);
-    if (!link) {
-      throw new Error(`No referral link for partner ${customer.partnerUsername}`);
+  const onboardResults = await mapWithConcurrency(
+    customers,
+    5,
+    async (customer, offset) => {
+      const link = linkByUsername.get(customer.partnerUsername);
+      if (!link) {
+        throw new Error(
+          `No referral link for partner ${customer.partnerUsername}`,
+        );
+      }
+
+      try {
+        const { clickId, amount } = await onboardCustomer({
+          dub,
+          customer,
+          link,
+          userAgent: userAgentAt(partnerLinks.length + offset),
+          saleEventName: "Subscription created",
+          clickIndex: partnerLinks.length + offset,
+        });
+
+        const lead: LeadResult = {
+          customerExternalId: customer.externalId,
+          partner: customer.partnerUsername,
+          plan: customer.plan,
+          clickId,
+        };
+
+        const sale: SaleResult | null =
+          amount !== null
+            ? {
+              customerExternalId: customer.externalId,
+              invoiceId: monthlyInvoiceId(customer.externalId, now),
+              amount,
+              ok: true,
+            }
+            : null;
+
+        return { lead, sale };
+      } catch (error) {
+        const amount = saleAmountCents(customer);
+        const sale: SaleResult | null =
+          amount !== null
+            ? {
+              customerExternalId: customer.externalId,
+              invoiceId: monthlyInvoiceId(customer.externalId, now),
+              amount,
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            }
+            : null;
+
+        return { lead: null as LeadResult | null, sale };
+      }
+    },
+  );
+
+  const leads: LeadResult[] = [];
+  const newSales: SaleResult[] = [];
+  for (const result of onboardResults) {
+    if (result.lead) {
+      leads.push(result.lead);
     }
-
-    try {
-      const { clickId, amount } = await onboardCustomer({
-        dub,
-        customer,
-        link,
-        userAgent: userAgentAt(partnerLinks.length + offset),
-        saleEventName: "Subscription created",
-        clickIndex: partnerLinks.length + offset,
-      });
-
-      leads.push({
-        customerExternalId: customer.externalId,
-        partner: customer.partnerUsername,
-        plan: customer.plan,
-        clickId,
-      });
-
-      if (amount !== null) {
-        newSales.push({
-          customerExternalId: customer.externalId,
-          invoiceId: monthlyInvoiceId(customer.externalId, now),
-          amount,
-          ok: true,
-        });
-      }
-    } catch (error) {
-      const amount = saleAmountCents(customer);
-      if (amount !== null) {
-        newSales.push({
-          customerExternalId: customer.externalId,
-          invoiceId: monthlyInvoiceId(customer.externalId, now),
-          amount,
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+    if (result.sale) {
+      newSales.push(result.sale);
     }
   }
-
-  const renewals: Array<{
-    customerExternalId: string;
-    invoiceId: string;
-    amount: number;
-    ok: boolean;
-    error?: string;
-  }> = [];
 
   const toRenew = [...customersDueOn(now), ...generatedCustomersToRenew(now)];
 
-  for (const customer of toRenew) {
-    const amount = saleAmountCents(customer);
-    const invoiceId = monthlyInvoiceId(customer.externalId, now);
-    if (amount === null) {
-      continue;
-    }
+  const renewalResults = await mapWithConcurrency(
+    toRenew,
+    8,
+    async (customer): Promise<SaleResult | null> => {
+      const amount = saleAmountCents(customer);
+      const invoiceId = monthlyInvoiceId(customer.externalId, now);
+      if (amount === null) {
+        return null;
+      }
 
-    try {
-      await trackSubscriptionSale({
-        dub,
-        customer,
-        eventName: "Invoice paid",
-      });
-      renewals.push({
-        customerExternalId: customer.externalId,
-        invoiceId,
-        amount,
-        ok: true,
-      });
-    } catch (error) {
-      renewals.push({
-        customerExternalId: customer.externalId,
-        invoiceId,
-        amount,
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
+      try {
+        await trackSubscriptionSale({
+          dub,
+          customer,
+          eventName: "Invoice paid",
+        });
+        return { customerExternalId: customer.externalId, invoiceId, amount, ok: true };
+      } catch (error) {
+        return {
+          customerExternalId: customer.externalId,
+          invoiceId,
+          amount,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+
+  const renewals = renewalResults.filter(
+    (result): result is SaleResult => result !== null,
+  );
 
   return NextResponse.json({
     date: now.toISOString().slice(0, 10),
