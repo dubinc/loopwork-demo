@@ -1,4 +1,6 @@
 import { customersDueOn, saleAmountCents } from "@/lib/demo/catalog";
+import { cancelCustomerSubscription } from "@/lib/demo/cancel-subscription";
+import { firstChurnMonth } from "@/lib/demo/churn";
 import { mapWithConcurrency } from "@/lib/demo/concurrency";
 import { createDubClient } from "@/lib/demo/dub";
 import { organicBrowseClickCount } from "@/lib/demo/funnel";
@@ -132,14 +134,58 @@ export async function GET(request: NextRequest) {
 
   const toRenew = [...customersDueOn(now), ...generatedCustomersToRenew(now)];
 
+  type ChurnResult = {
+    customerExternalId: string;
+    ok: boolean;
+    error?: string;
+  };
+
   const renewalResults = await mapWithConcurrency(
     toRenew,
     8,
-    async (customer): Promise<SaleResult | null> => {
+    async (
+      customer,
+    ): Promise<
+      | { kind: "sale"; sale: SaleResult }
+      | { kind: "churn"; churn: ChurnResult }
+      | null
+    > => {
       const amount = saleAmountCents(customer);
       const invoiceId = monthlyInvoiceId(customer.externalId, now);
       if (amount === null) {
         return null;
+      }
+
+      try {
+        const existing = await dub.customers.get({
+          id: `ext_${customer.externalId}`,
+        });
+        if (existing.subscriptionCanceledAt) {
+          return null;
+        }
+      } catch {
+        // Customer was never created in Dub (e.g. a reconstructed extra
+        // from a salted backfill run) — skip rather than invent a renewal.
+        return null;
+      }
+
+      if (firstChurnMonth(customer, now)) {
+        try {
+          await cancelCustomerSubscription(customer.externalId, now);
+          return {
+            kind: "churn",
+            churn: { customerExternalId: customer.externalId, ok: true },
+          };
+        } catch (error) {
+          return {
+            kind: "churn",
+            churn: {
+              customerExternalId: customer.externalId,
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
       }
 
       try {
@@ -148,22 +194,39 @@ export async function GET(request: NextRequest) {
           customer,
           eventName: "Invoice paid",
         });
-        return { customerExternalId: customer.externalId, invoiceId, amount, ok: true };
+        return {
+          kind: "sale",
+          sale: {
+            customerExternalId: customer.externalId,
+            invoiceId,
+            amount,
+            ok: true,
+          },
+        };
       } catch (error) {
         return {
-          customerExternalId: customer.externalId,
-          invoiceId,
-          amount,
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
+          kind: "sale",
+          sale: {
+            customerExternalId: customer.externalId,
+            invoiceId,
+            amount,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          },
         };
       }
     },
   );
 
-  const renewals = renewalResults.filter(
-    (result): result is SaleResult => result !== null,
-  );
+  const renewals: SaleResult[] = [];
+  const churns: ChurnResult[] = [];
+  for (const result of renewalResults) {
+    if (result?.kind === "sale") {
+      renewals.push(result.sale);
+    } else if (result?.kind === "churn") {
+      churns.push(result.churn);
+    }
+  }
 
   return NextResponse.json({
     date: now.toISOString().slice(0, 10),
@@ -173,5 +236,6 @@ export async function GET(request: NextRequest) {
       new: newSales,
       renewals,
     },
+    churns,
   });
 }

@@ -11,7 +11,7 @@ import { organicDailyLeadTarget, organicDailySalesTarget } from "./funnel";
 import { seededRandom } from "./random";
 
 /** First day of the historical backfill. Cron renewals look back to this date. */
-const DEMO_ACTIVITY_START = Date.UTC(2026, 7, 3);
+export const DEMO_ACTIVITY_START = Date.UTC(2026, 7, 3);
 
 /** First day the live activity cron started. Do not change — existing cron customers use this epoch. */
 const DEMO_SEQUENCE_EPOCH = Date.UTC(2026, 8, 1);
