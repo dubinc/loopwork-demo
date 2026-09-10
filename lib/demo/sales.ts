@@ -35,3 +35,25 @@ export async function trackSubscriptionSale({
     invoiceId,
   });
 }
+
+/** Live recurring invoice. Timestamp is always now — use demo/commission to backdate. */
+export async function trackInvoicePaid({
+  dub,
+  customerExternalId,
+  amount,
+  date = new Date(),
+}: {
+  dub: Dub;
+  customerExternalId: string;
+  amount: number;
+  date?: Date;
+}) {
+  return dub.track.sale({
+    customerExternalId,
+    amount,
+    currency: "usd",
+    eventName: "Invoice paid",
+    paymentProcessor: "stripe",
+    invoiceId: monthlyInvoiceId(customerExternalId, date),
+  });
+}

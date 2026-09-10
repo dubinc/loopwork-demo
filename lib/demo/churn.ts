@@ -27,9 +27,9 @@ export function signupDateOf(customer: DemoCustomer): Date {
   return new Date(DEMO_ACTIVITY_START);
 }
 
-function wouldChurnInMonth(customer: DemoCustomer, month: Date) {
+function wouldChurnInMonth(externalId: string, month: Date) {
   return (
-    seededRandom(`churn:${customer.externalId}:${utcMonthKey(month)}`) <
+    seededRandom(`churn:${externalId}:${utcMonthKey(month)}`) <
     MONTHLY_CHURN_RATE
   );
 }
@@ -38,15 +38,17 @@ function wouldChurnInMonth(customer: DemoCustomer, month: Date) {
  * First billing month (after signup) this customer would cancel.
  * Null if they stay subscribed through `now`.
  */
-export function firstChurnMonth(customer: DemoCustomer, now = new Date()): Date | null {
-  const signup = signupDateOf(customer);
-
+export function firstChurnMonthFor(
+  externalId: string,
+  signup: Date,
+  now = new Date(),
+): Date | null {
   for (let monthsAgo = 1; monthsAgo <= 24; monthsAgo++) {
     const month = addUtcMonths(signup, monthsAgo);
     if (month.getTime() > now.getTime()) {
       break;
     }
-    if (wouldChurnInMonth(customer, month)) {
+    if (wouldChurnInMonth(externalId, month)) {
       return month;
     }
   }
@@ -54,9 +56,17 @@ export function firstChurnMonth(customer: DemoCustomer, now = new Date()): Date 
   return null;
 }
 
+export function firstChurnMonth(customer: DemoCustomer, now = new Date()) {
+  return firstChurnMonthFor(customer.externalId, signupDateOf(customer), now);
+}
+
 /** Already past their churn month — do not invoice. */
-export function hasAlreadyChurned(customer: DemoCustomer, now = new Date()) {
-  const churned = firstChurnMonth(customer, now);
+export function hasAlreadyChurnedFor(
+  externalId: string,
+  signup: Date,
+  now = new Date(),
+) {
+  const churned = firstChurnMonthFor(externalId, signup, now);
   if (!churned) {
     return false;
   }
@@ -66,6 +76,10 @@ export function hasAlreadyChurned(customer: DemoCustomer, now = new Date()) {
     (utcMonthKey(churned) === utcMonthKey(now) &&
       churned.getUTCDate() <= now.getUTCDate())
   );
+}
+
+export function hasAlreadyChurned(customer: DemoCustomer, now = new Date()) {
+  return hasAlreadyChurnedFor(customer.externalId, signupDateOf(customer), now);
 }
 
 /** This billing cycle is the one they cancel on — mark canceled, skip the sale. */

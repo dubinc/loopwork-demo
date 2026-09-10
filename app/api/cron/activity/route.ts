@@ -1,18 +1,20 @@
-import { customersDueOn, saleAmountCents } from "@/lib/demo/catalog";
+import { saleAmountCents } from "@/lib/demo/catalog";
 import { cancelCustomerSubscription } from "@/lib/demo/cancel-subscription";
-import { firstChurnMonth } from "@/lib/demo/churn";
 import { mapWithConcurrency } from "@/lib/demo/concurrency";
 import { createDubClient } from "@/lib/demo/dub";
 import { organicBrowseClickCount } from "@/lib/demo/funnel";
 import { onboardCustomer } from "@/lib/demo/onboard";
 import { getPartnerLinks } from "@/lib/demo/partners";
+import { dailyNewCustomers, extraDailyCustomers } from "@/lib/demo/prospects";
 import {
-  dailyNewCustomers,
-  extraDailyCustomers,
-  generatedCustomersToRenew,
-} from "@/lib/demo/prospects";
-import { monthlyInvoiceId, trackSubscriptionSale } from "@/lib/demo/sales";
+  churnDateOf,
+  customersDueToRenew,
+  invoiceAmountCents,
+  planRenewal,
+} from "@/lib/demo/renewals";
+import { monthlyInvoiceId, trackInvoicePaid } from "@/lib/demo/sales";
 import { recordBrowseClicks, userAgentAt } from "@/lib/demo/track-click";
+import { listWorkspaceCustomers } from "@/lib/demo/workspace-customers";
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -132,7 +134,7 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const toRenew = [...customersDueOn(now), ...generatedCustomersToRenew(now)];
+  const toRenew = customersDueToRenew(await listWorkspaceCustomers(), now);
 
   type ChurnResult = {
     customerExternalId: string;
@@ -150,28 +152,23 @@ export async function GET(request: NextRequest) {
       | { kind: "churn"; churn: ChurnResult }
       | null
     > => {
-      const amount = saleAmountCents(customer);
+      const amount = invoiceAmountCents(customer);
       const invoiceId = monthlyInvoiceId(customer.externalId, now);
       if (amount === null) {
         return null;
       }
 
-      try {
-        const existing = await dub.customers.get({
-          id: `ext_${customer.externalId}`,
-        });
-        if (existing.subscriptionCanceledAt) {
-          return null;
-        }
-      } catch {
-        // Customer was never created in Dub (e.g. a reconstructed extra
-        // from a salted backfill run) — skip rather than invent a renewal.
+      const plan = planRenewal(customer, now);
+      if (plan === "skip") {
         return null;
       }
 
-      if (firstChurnMonth(customer, now)) {
+      if (plan === "churn") {
         try {
-          await cancelCustomerSubscription(customer.externalId, now);
+          await cancelCustomerSubscription(
+            customer.externalId,
+            churnDateOf(customer, now),
+          );
           return {
             kind: "churn",
             churn: { customerExternalId: customer.externalId, ok: true },
@@ -189,10 +186,11 @@ export async function GET(request: NextRequest) {
       }
 
       try {
-        await trackSubscriptionSale({
+        await trackInvoicePaid({
           dub,
-          customer,
-          eventName: "Invoice paid",
+          customerExternalId: customer.externalId,
+          amount,
+          date: now,
         });
         return {
           kind: "sale",
